@@ -1,0 +1,166 @@
+use std::fs::File;
+use std::io::{self, Write};
+use std::io::BufWriter;
+use std::time::Duration;
+use std::usize::MAX;
+use clap::{value_parser, Arg, Command};
+use serialport::SerialPort;
+use pcap_file::pcap::{PcapWriter, PcapPacket};
+use chrono::prelude::*;
+
+struct CaptureSerial {
+    port: Box<dyn SerialPort>,
+    baud_rate: u32,
+    parity: char,
+    stopbits: u8,
+    frame_gap_ms: u64,
+}
+
+const MAX_PACKET_SIZE: usize = 1024;
+
+impl CaptureSerial {
+    fn new(port_name: &str, baud_rate: u32, parity: char, stopbits: u8, frame_gap_ms: u64) -> io::Result<Self> {
+        let port = serialport::new(port_name, baud_rate)
+            .parity(match parity {
+                'o' => serialport::Parity::Odd,
+                'e' => serialport::Parity::Even,
+                _ => serialport::Parity::None,
+            })
+            .stop_bits(match stopbits {
+                1 => serialport::StopBits::One,
+                2 => serialport::StopBits::Two,
+                _ => serialport::StopBits::One,
+            })
+            .timeout(Duration::from_millis(frame_gap_ms))
+            .open()?;
+
+        Ok(CaptureSerial {
+            port,
+            baud_rate,
+            parity,
+            stopbits,
+            frame_gap_ms,
+        })
+    }
+
+    fn capture_packet(&mut self) -> Option<Vec<u8>> {
+        let mut buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
+        let mut bytes_read = 0;
+        while match self.port.read(&mut buffer[bytes_read..]) {
+            Ok(this_read_len) => {
+                bytes_read += this_read_len;
+                bytes_read < buffer.len()
+            },
+            Err(_) => false,
+        } { };
+
+        if bytes_read == 0 {
+            return None;
+        } else {
+            Some(buffer[..bytes_read].to_vec())
+        }
+    }
+
+    fn capture(&mut self, file: File) -> io::Result<()> {
+        // Setup PCap Header to set our datalink type.
+        let pcap_header = pcap_file::pcap::PcapHeader {
+            version_major: 2,
+            version_minor: 4,
+            snaplen: MAX_PACKET_SIZE as u32,
+            datalink: pcap_file::DataLink::USER0,
+            ts_correction: 0,
+            ts_accuracy: 0,
+            ts_resolution: pcap_file::TsResolution::MicroSecond,
+            endianness: pcap_file::Endianness::Big
+        };
+        let mut writer = PcapWriter::with_header(file, pcap_header).expect("Error writing output file");
+        let zero_time = Utc::now().timestamp_micros(); // Initialize zero time
+        loop {
+            if let Some(packet) = self.capture_packet() {
+
+                writer.write_packet(
+                    &PcapPacket {
+                        timestamp: Duration::from_micros(
+                            ((Utc::now().timestamp_micros() - zero_time) as i64).try_into().unwrap()
+                        ),
+                        orig_len: packet.len() as u32,
+                        data: packet.into(),
+                    }
+                ).unwrap();
+            }
+        }
+    }
+}
+
+
+
+fn main() {
+    let matches = Command::new("SerialPCAP")
+        .version("1.0")
+        .author("Author Name <email@example.com>")
+        .about("Captures serial port data and writes to a pcap file")
+        .arg(Arg::new("baud")
+            .short('b')
+            .long("baud")
+            .value_name("BAUD")
+            .default_value("9600")
+            .value_parser(value_parser!(u32))
+            .help("Serial port speed (default 9600)"))
+        .arg(Arg::new("parity")
+            .short('y')
+            .long("parity")
+            .value_name("PARITY")
+            .default_value("n")
+            .value_parser(value_parser!(char))
+            .help("o (=odd) | e (=even) | n (=none) (default none)"))
+        .arg(Arg::new("stopbits")
+            .short('p')
+            .long("stopbits")
+            .value_name("STOPBITS")
+            .value_parser(value_parser!(u8))
+            .default_value("1")
+            .help("1 | 2 (default 1)"))
+        .arg(Arg::new("gap")
+            .short('g')
+            .long("gap")
+            .value_name("GAP")
+            .default_value("10")
+            .value_parser(value_parser!(u64))
+            .help("Inter frame gap in milliseconds (default 10)"))
+        .arg(Arg::new("output")
+            .short('o')
+            .long("output")
+            .value_name("OUTPUT")
+            .help("Output file prefix or pipe (default port name)"))
+        .arg(Arg::new("pipe")
+            .long("pipe")
+            .value_parser(value_parser!(bool))
+            .help("Use named pipe instead of file"))
+        .arg(Arg::new("port")
+            .help("Serial port name")
+            .required(true)
+            .index(1))
+        .get_matches();
+
+    let baud_rate= *matches.get_one::<u32>("baud").unwrap(); //.unwrap(); //.parse().unwrap();
+    let parity = *matches.get_one::<char>("parity").unwrap(); // .chars().next().unwrap();
+    let stopbits = *matches.get_one::<u8>("stopbits").unwrap(); //.parse().unwrap();
+    let frame_gap_ms = *matches.get_one::<u64>("gap").unwrap(); //.parse().unwrap();
+    let port_name = matches.get_one::<String>("port").unwrap();
+    let output_file_prefix = matches.get_one("output").unwrap_or(port_name);
+    let use_pipe = matches.contains_id("pipe");
+
+    let output_file = if use_pipe {
+        output_file_prefix.to_string()
+    } else {
+        format!("{}-{}.pcap", output_file_prefix, chrono::Utc::now().format("%Y%m%d-%H%M%S"))
+    };
+
+    let mut bus = CaptureSerial::new(port_name, baud_rate, parity, stopbits, frame_gap_ms).expect("Failed to open serial port");
+
+    let file = File::create(output_file).expect("Failed to create output file");
+
+    if let Err(e) = bus.capture(file) {
+        eprintln!("Error occurred: {}", e);
+    }
+}
