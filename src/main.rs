@@ -1,13 +1,41 @@
+//! A utility for capturing serial port data and writing it to PCAP files.
+//! 
+//! This program allows capturing data from a serial port and saving it in the PCAP
+//! file format, which is commonly used for network packet captures. The captured data
+//! can be analyzed using standard network analysis tools like Wireshark.
+//!
+//! # Features
+//! 
+//! - Configurable baud rate, parity, and stop bits
+//! - Adjustable inter-frame gap timing
+//! - Output to either files or named pipes
+//! - Automatic timestamp recording
+//! - PCAP format compatibility
+//!
+//! # Example Usage
+//!
+//! ```bash
+//! serialpcap /dev/ttyUSB0 -b 115200 -y n -p 1 -g 10 -o output
+//! ```
+
+
 use std::fs::File;
-use std::io::{self, Write};
-use std::io::BufWriter;
+use std::io;
 use std::time::Duration;
-use std::usize::MAX;
 use clap::{value_parser, Arg, Command};
 use serialport::SerialPort;
 use pcap_file::pcap::{PcapWriter, PcapPacket};
 use chrono::prelude::*;
 
+/// Represents a serial port capture session with configurable parameters
+/// 
+/// # Fields
+/// 
+/// * `port` - The serial port interface
+/// * `baud_rate` - The communication speed in bits per second
+/// * `parity` - Parity checking mode ('n' for none, 'e' for even, 'o' for odd)
+/// * `stopbits` - Number of stop bits (1 or 2)
+/// * `frame_gap_ms` - Time gap between frames in milliseconds
 struct CaptureSerial {
     port: Box<dyn SerialPort>,
     baud_rate: u32,
@@ -43,6 +71,11 @@ impl CaptureSerial {
         })
     }
 
+    /// Captures a packet from the serial port
+    ///
+    /// # Returns
+    /// 
+    /// An `Option<Vec<u8>>` containing the captured packet data. Returns `None` if no data is captured.
     fn capture_packet(&mut self) -> Option<Vec<u8>> {
         let mut buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
         let mut bytes_read = 0;
@@ -61,6 +94,11 @@ impl CaptureSerial {
         }
     }
 
+    /// Captures data from the serial port and writes it to a PCAP file
+    /// 
+    /// # Arguments
+    ///     
+    /// * `file` - The output file to write the captured data to
     fn capture(&mut self, file: File) -> io::Result<()> {
         // Setup PCap Header to set our datalink type.
         let pcap_header = pcap_file::pcap::PcapHeader {
