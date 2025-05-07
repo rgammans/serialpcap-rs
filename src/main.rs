@@ -24,8 +24,11 @@ use std::io;
 use std::time::Duration;
 use clap::{value_parser, Arg, Command};
 use serialport::SerialPort;
-use pcap_file::pcap::{PcapWriter, PcapPacket};
+use pcap_file::{pcap::{PcapPacket, PcapWriter}, DataLink};
 use chrono::prelude::*;
+use crate::datalink::parse_datalink;
+
+pub mod datalink;
 
 /// Represents a serial port capture session with configurable parameters
 /// 
@@ -38,6 +41,7 @@ use chrono::prelude::*;
 /// * `frame_gap_ms` - Time gap between frames in milliseconds
 struct CaptureSerial {
     port: Box<dyn SerialPort>,
+    datalink: DataLink,
     baud_rate: u32,
     parity: char,
     stopbits: u8,
@@ -47,7 +51,7 @@ struct CaptureSerial {
 const MAX_PACKET_SIZE: usize = 1024;
 
 impl CaptureSerial {
-    fn new(port_name: &str, baud_rate: u32, parity: char, stopbits: u8, frame_gap_ms: u64) -> io::Result<Self> {
+    fn new(port_name: &str, baud_rate: u32, parity: char, stopbits: u8, frame_gap_ms: u64, datalink: DataLink) -> io::Result<Self> {
         let port = serialport::new(port_name, baud_rate)
             .parity(match parity {
                 'o' => serialport::Parity::Odd,
@@ -68,6 +72,7 @@ impl CaptureSerial {
             parity,
             stopbits,
             frame_gap_ms,
+            datalink
         })
     }
 
@@ -105,7 +110,7 @@ impl CaptureSerial {
             version_major: 2,
             version_minor: 4,
             snaplen: MAX_PACKET_SIZE as u32,
-            datalink: pcap_file::DataLink::USER0,
+            datalink: self.datalink.clone(),
             ts_correction: 0,
             ts_accuracy: 0,
             ts_resolution: pcap_file::TsResolution::MicroSecond,
@@ -174,6 +179,12 @@ fn main() {
             .long("pipe")
             .value_parser(value_parser!(bool))
             .help("Use named pipe instead of file"))
+        .arg(Arg::new("datalinktype")
+            .long("datalinktype")
+            .value_parser(&parse_datalink)
+            .help("Datalink type (default USER0)")
+            .default_value("USER0")
+        )
         .arg(Arg::new("port")
             .help("Serial port name")
             .required(true)
@@ -187,6 +198,8 @@ fn main() {
     let port_name = matches.get_one::<String>("port").unwrap();
     let output_file_prefix = matches.get_one("output").unwrap_or(port_name);
     let use_pipe = matches.contains_id("pipe");
+    let datalink = matches.get_one("datalinktype").unwrap_or(&pcap_file::DataLink::USER0);
+
 
     let output_file = if use_pipe {
         output_file_prefix.to_string()
@@ -194,7 +207,7 @@ fn main() {
         format!("{}-{}.pcap", output_file_prefix, chrono::Utc::now().format("%Y%m%d-%H%M%S"))
     };
 
-    let mut bus = CaptureSerial::new(port_name, baud_rate, parity, stopbits, frame_gap_ms).expect("Failed to open serial port");
+    let mut bus = CaptureSerial::new(port_name, baud_rate, parity, stopbits, frame_gap_ms, *datalink).expect("Failed to open serial port");
 
     let file = File::create(output_file).expect("Failed to create output file");
 
