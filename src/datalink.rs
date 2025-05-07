@@ -1,7 +1,10 @@
+use chrono::{Timelike, Utc};
 use pcap_file::DataLink;
 use clap::error::Error;
 use std::sync::OnceLock;
 use std::collections::HashMap;
+
+use crate::datalink;
 
 
 const MAX_DATALINK_TYPES: u32 = 512;
@@ -44,4 +47,28 @@ pub fn parse_datalink(datalink_str:  &str) -> Result<DataLink, Error> {
     } else {
         Err(Error::raw(clap::error::ErrorKind::InvalidValue,format!("Unknown datalink type: {}", datalink_str)))
     }
-}   
+}
+
+
+fn raw_encapsulate(data: &[u8]) -> Vec<u8> {
+    // This function is the null encapsulation function.
+    // It simply returns the data as is.
+    //
+    // This is used for the RAW and USERx datalink types.
+    data.to_vec()
+}
+
+
+pub fn get_encapsulated_data(timestamp: &chrono::DateTime<Utc>, bus_name: &str, datalink: &DataLink, data: &[u8]) -> Result<Vec<u8>, String> {
+    match datalink {
+        DataLink::USER0 | DataLink::USER1 | DataLink::USER2 | 
+        DataLink::USER3 | DataLink::USER4 | DataLink::USER5 | 
+        DataLink::USER6 | DataLink::USER7 | DataLink::USER8 | 
+        DataLink::USER9 | DataLink::USER10 | DataLink::USER11 |
+        DataLink::USER12 | DataLink::USER13 | DataLink::USER14 |
+        DataLink::USER15 | DataLink::RAW => Ok(raw_encapsulate(data)),
+        _ => Err(format!("Unsupported datalink type: {:?}", datalink)),
+    }
+}
+
+}

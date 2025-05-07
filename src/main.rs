@@ -30,6 +30,13 @@ use crate::datalink::parse_datalink;
 
 pub mod datalink;
 
+
+/// Represents the encapsulation mode used for the captured data.
+pub enum EncapsulationMode {
+    Raw,
+    DatalinkType
+}
+ 
 /// Represents a serial port capture session with configurable parameters
 /// 
 /// # Fields
@@ -40,18 +47,20 @@ pub mod datalink;
 /// * `stopbits` - Number of stop bits (1 or 2)
 /// * `frame_gap_ms` - Time gap between frames in milliseconds
 struct CaptureSerial {
-    port: Box<dyn SerialPort>,
-    datalink: DataLink,
-    baud_rate: u32,
-    parity: char,
-    stopbits: u8,
-    frame_gap_ms: u64,
+   port: Box<dyn SerialPort>,
+   datalink: DataLink,
+   baud_rate: u32,
+   parity: char,
+   stopbits: u8,
+   frame_gap_ms: u64,
+   encap_mode: EncapsulationMode
 }
+
 
 const MAX_PACKET_SIZE: usize = 1024;
 
 impl CaptureSerial {
-    fn new(port_name: &str, baud_rate: u32, parity: char, stopbits: u8, frame_gap_ms: u64, datalink: DataLink) -> io::Result<Self> {
+    fn new(port_name: &str, baud_rate: u32, parity: char, stopbits: u8, frame_gap_ms: u64, datalink: DataLink, encap_mode: EncapsulationMode) -> io::Result<Self> {
         let port = serialport::new(port_name, baud_rate)
             .parity(match parity {
                 'o' => serialport::Parity::Odd,
@@ -72,7 +81,8 @@ impl CaptureSerial {
             parity,
             stopbits,
             frame_gap_ms,
-            datalink
+            datalink,
+            encap_mode
         })
     }
 
@@ -121,13 +131,21 @@ impl CaptureSerial {
         loop {
             if let Some(packet) = self.capture_packet() {
 
+                // Encapsulate the packet data for the datalink type/force raw
+                let encap_packet = match self.encap_mode {
+                    EncapsulationMode::Raw => packet.clone(),
+                    EncapsulationMode::DatalinkType => {
+                        // Use the datalink type to encapsulate the data
+                        datalink::get_encapsulated_data(&Utc::now(), "serial", &self.datalink, &packet).unwrap()
+                    }
+                };
                 writer.write_packet(
                     &PcapPacket {
                         timestamp: Duration::from_micros(
                             ((Utc::now().timestamp_micros() - zero_time) as i64).try_into().unwrap()
                         ),
-                        orig_len: packet.len() as u32,
-                        data: packet.into(),
+                        orig_len: encap_packet.len() as u32,
+                        data: encap_packet.into(),
                     }
                 ).unwrap();
             }
@@ -177,8 +195,12 @@ fn main() {
             .help("Output file prefix or pipe (default port name)"))
         .arg(Arg::new("pipe")
             .long("pipe")
-            .value_parser(value_parser!(bool))
+            .num_args(0)
             .help("Use named pipe instead of file"))
+        .arg(Arg::new("raw")
+            .long("force-raw")
+            .num_args(0)
+            .help("Use raw encapsulation instead of datalink type"))
         .arg(Arg::new("datalinktype")
             .long("datalinktype")
             .value_parser(&parse_datalink)
@@ -191,14 +213,15 @@ fn main() {
             .index(1))
         .get_matches();
 
-    let baud_rate= *matches.get_one::<u32>("baud").unwrap(); //.unwrap(); //.parse().unwrap();
-    let parity = *matches.get_one::<char>("parity").unwrap(); // .chars().next().unwrap();
-    let stopbits = *matches.get_one::<u8>("stopbits").unwrap(); //.parse().unwrap();
-    let frame_gap_ms = *matches.get_one::<u64>("gap").unwrap(); //.parse().unwrap();
+    let baud_rate= *matches.get_one::<u32>("baud").unwrap(); 
+    let parity = *matches.get_one::<char>("parity").unwrap();
+    let stopbits = *matches.get_one::<u8>("stopbits").unwrap();
+    let frame_gap_ms = *matches.get_one::<u64>("gap").unwrap();
     let port_name = matches.get_one::<String>("port").unwrap();
     let output_file_prefix = matches.get_one("output").unwrap_or(port_name);
     let use_pipe = matches.contains_id("pipe");
     let datalink = matches.get_one("datalinktype").unwrap_or(&pcap_file::DataLink::USER0);
+    let encap_mode: EncapsulationMode = if matches.contains_id("raw") { EncapsulationMode::Raw } else { EncapsulationMode::DatalinkType };
 
 
     let output_file = if use_pipe {
@@ -207,7 +230,7 @@ fn main() {
         format!("{}-{}.pcap", output_file_prefix, chrono::Utc::now().format("%Y%m%d-%H%M%S"))
     };
 
-    let mut bus = CaptureSerial::new(port_name, baud_rate, parity, stopbits, frame_gap_ms, *datalink).expect("Failed to open serial port");
+    let mut bus = CaptureSerial::new(port_name, baud_rate, parity, stopbits, frame_gap_ms, *datalink, encap_mode).expect("Failed to open serial port");
 
     let file = File::create(output_file).expect("Failed to create output file");
 
