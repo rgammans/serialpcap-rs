@@ -195,8 +195,8 @@ fn main() {
             .help("Output file prefix or pipe (default port name)"))
         .arg(Arg::new("pipe")
             .long("pipe")
-            .num_args(0)
-            .help("Use named pipe instead of file"))
+            .action(ArgAction::SetTrue)
+            .help("Pipe mode: treat the output file as exact name not a prefix"))
         .arg(Arg::new("raw")
             .long("force-raw")
             .num_args(0)
@@ -219,7 +219,7 @@ fn main() {
     let frame_gap_ms = *matches.get_one::<u64>("gap").unwrap();
     let port_name = matches.get_one::<String>("port").unwrap();
     let output_file_prefix = matches.get_one("output").unwrap_or(port_name);
-    let use_pipe = matches.contains_id("pipe");
+    let use_pipe = matches.get_flag("pipe");
     let datalink = matches.get_one("datalinktype").unwrap_or(&pcap_file::DataLink::USER0);
     let encap_mode: EncapsulationMode = if matches.contains_id("raw") { EncapsulationMode::Raw } else { EncapsulationMode::DatalinkType };
 

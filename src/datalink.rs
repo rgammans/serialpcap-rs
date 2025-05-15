@@ -70,5 +70,3 @@ pub fn get_encapsulated_data(timestamp: &chrono::DateTime<Utc>, bus_name: &str, 
         _ => Err(format!("Unsupported datalink type: {:?}", datalink)),
     }
 }
-
-}
