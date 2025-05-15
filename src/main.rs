@@ -22,9 +22,9 @@
 use std::fs::File;
 use std::io;
 use std::time::Duration;
-use clap::{value_parser, Arg, Command};
+use clap::{value_parser, Arg, Command, ArgAction};
 use serialport::SerialPort;
-use pcap_file::{pcap::{PcapPacket, PcapWriter}, DataLink};
+use pcap_file::{pcap::{PcapPacket, PcapWriter}, pcapng::blocks::packet, DataLink};
 use chrono::prelude::*;
 use crate::datalink::parse_datalink;
 
@@ -91,7 +91,7 @@ impl CaptureSerial {
     /// # Returns
     /// 
     /// An `Option<Vec<u8>>` containing the captured packet data. Returns `None` if no data is captured.
-    fn capture_packet(&mut self) -> Option<Vec<u8>> {
+    fn capture_packet(&mut self) -> Result<Vec<u8>, io::Error> {
         let mut buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
         let mut bytes_read = 0;
         while match self.port.read(&mut buffer[bytes_read..]) {
@@ -99,13 +99,23 @@ impl CaptureSerial {
                 bytes_read += this_read_len;
                 bytes_read < buffer.len()
             },
-            Err(_) => false,
-        } { };
+            Err(e) => {
+                if (e.kind() == io::ErrorKind::TimedOut) {
+                    // Timeout is expected, but
+                    // indicates the end of a packet.
+                    false
+                } else {
+                    // Handle other errors
+                    return Err(e);
+                    false
+                }
+            },
+        }  {}
 
         if bytes_read == 0 {
-            return None;
+            Ok(vec![])
         } else {
-            Some(buffer[..bytes_read].to_vec())
+            Ok(buffer[..bytes_read].to_vec())
         }
     }
 
@@ -129,7 +139,11 @@ impl CaptureSerial {
         let mut writer = PcapWriter::with_header(file, pcap_header).expect("Error writing output file");
         let zero_time = Utc::now().timestamp_micros(); // Initialize zero time
         loop {
-            if let Some(packet) = self.capture_packet() {
+            let packet_maybe = self.capture_packet(); 
+            if let Ok(packet) = packet_maybe {
+                if packet.is_empty() {
+                    continue;
+                }
 
                 // Encapsulate the packet data for the datalink type/force raw
                 let encap_packet = match self.encap_mode {
@@ -148,6 +162,12 @@ impl CaptureSerial {
                         data: encap_packet.into(),
                     }
                 ).unwrap();
+            } else {
+                // Recast error to io::Error
+                if let Err(e) = packet_maybe {
+                    return Err(e);
+                }
+                return Err(io::Error::new(io::ErrorKind::Other, "Unknown error"));
             }
         }
     }
