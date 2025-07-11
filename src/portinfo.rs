@@ -1,9 +1,9 @@
-use std::ops::{Deref, DerefMut};
+use std::{default, ops::{Deref, DerefMut}};
 
 use serialport::{self, SerialPort};
 use gpio::{GpioOut, GpioValue};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PortControlLines {
     pub dsr: bool,      // Data Set Ready
     pub cts: bool,      // Clear To Send
@@ -26,73 +26,74 @@ impl PortControlLines {
     }
 }
 
-/// Trait for serial reflectors ports.
-/// 
-/// A Serial Reflector ports is a device that reflects  outputs data and control
-/// line states from another serial port.
-/// 
-/// This trait is used to define the behaviour of serial reflector ports, so
-/// that they can be used in a generic way, and we can implement capture with
-/// interposing serial ports.
-/// 
-/// This trait allows implementations for define their own wiring for the
-/// controls lines, Traditionally, the CTS is connected to to RTS and DSR to DTR,
-/// but this is not always the case, and ignores CD and RI. - but in some hardware
-/// they could be implemented with for instance gpios.
-pub trait SerialReflection {
-    /// Sets the port control lines state.
-    fn reflect_control_lines(&mut self, lines: &PortControlLines) -> serialport::Result<()>;
-    fn capture_control_lines(&mut self) -> serialport::Result<PortControlLines>;
+pub enum AnySerialPort {
+    Basic(Box<dyn serialport::SerialPort>),
+    Advanced(Box<dyn AdvancedSerialPort>),
 }
 
+impl AnySerialPort {
+    pub fn as_serial_port(&mut self) -> &mut dyn serialport::SerialPort {
+        match self {
+            AnySerialPort::Basic(port) => port.as_mut(),
+            AnySerialPort::Advanced(port) => port.as_mut()
+        }
+    }
 
-pub struct SerialReflectorPort<T>
-where T: serialport::SerialPort
-{
-    port: T,
-}
-
-impl<T> SerialReflectorPort<T>
-where T: serialport::SerialPort
-{
-    pub fn new(port: T) -> Self {
-        SerialReflectorPort { port }
+    pub fn capture_control_lines(&mut self) -> serialport::Result<PortControlLines> {
+        match self {
+            AnySerialPort::Basic(port) => {
+                let mut lines = PortControlLines::new();
+                lines.dsr = port.read_data_set_ready()?;
+                lines.cts = port.read_clear_to_send()?;
+                lines.cd = port.read_carrier_detect()?;
+                lines.ri = port.read_ring_indicator()?;
+                lines.dtr = false; // DTR is not captured in basic ports
+                lines.rts = false; // RTS is not captured in basic ports
+                Ok(lines)
+            },
+            AnySerialPort::Advanced(port) => 
+                Ok(PortControlLines {
+                    dsr: port.read_data_set_ready().unwrap_or(false),
+                    cts: port.read_clear_to_send().unwrap_or(false),
+                    cd: port.read_carrier_detect().unwrap_or(false),
+                    ri: port.read_ring_indicator().unwrap_or(false),
+                    dtr: port.read_data_terminal_ready().unwrap_or(false),
+                    rts: port.read_request_to_send().unwrap_or(false),
+                    })   
+        }
+    }
+    pub fn reflect_control_lines(&mut self, lines: &PortControlLines) -> serialport::Result<()> {
+        match self {
+            AnySerialPort::Basic(port) => {
+                port.write_data_terminal_ready(lines.dsr)?;
+                port.write_request_to_send(lines.cts)
+            },
+            AnySerialPort::Advanced(port) => {
+                port.write_data_terminal_ready(lines.dsr)?;
+                port.write_request_to_send(lines.cts)?;
+                if port.can_set_ring_indicator() {
+                    port.set_ring_indicator(lines.ri)?;
+                }
+                if port.can_set_carrier_detect() {
+                    port.set_carrier_detect(lines.cd)?;
+                }
+                Ok(())
+            } 
+        }
     }
 }
 
-impl<T> Deref for SerialReflectorPort<T>
-where T: serialport::SerialPort
-{
-    type Target = T;
+pub trait AdvancedSerialPort : serialport::SerialPort + Send + Sync {
+    // Read the DSR Set set state.
+   // fn read_data_set_ready(&mut self) -> serialport::Result<bool>;
+    // Read the CTS Set set state.
+   // fn read_clear_to_send(&mut self) -> serialport::Result<bool>;
+    // Read the CD Set set state.
 
-    fn deref(&self) -> &Self::Target {
-        &self.port
-    }
-}
+  //  fn read_carrier_detect(&mut self) -> serialport::Result<bool>;
+    // Read the RI Set set state.
+   /// fn read_ring_indicator(&mut self) -> serialport::Result<bool>;
 
-impl<T> SerialReflection for SerialReflectorPort<T>
-where T: serialport::SerialPort
-{
-    fn reflect_control_lines(&mut self, lines: &PortControlLines) -> serialport::Result<()>
-     {
-        self.port.write_data_terminal_ready(lines.dsr)?;
-        self.port.write_request_to_send(lines.cts)
-    }
-    fn capture_control_lines(&mut self) -> serialport::Result<PortControlLines> {
-         Ok(PortControlLines{
-            dsr: self.port.read_data_set_ready()?,
-            cts: self.port.read_clear_to_send()?,
-            cd:  self.port.read_carrier_detect()?,
-            ri:  self.port.read_ring_indicator()?,
-            dtr: false,
-            rts: false,            // dtr: port.write_data_terminal_ready(true)?,
-            // rts: port.is_request_to_send(),
-        })
-    }
-}
-
-pub trait AdvancedSerialPort : SerialReflection
-{
     // Read the RTS Set set state.
     fn read_request_to_send(&mut self) -> serialport::Result<bool> ;
     // Read the DTR Set state.
@@ -126,32 +127,6 @@ pub trait AdvancedSerialPort : SerialReflection
     }
 }
 
-impl<T> SerialReflection for T
-where
-    T: serialport::SerialPort + AdvancedSerialPort,
-{
-    fn reflect_control_lines(&mut self, lines: &PortControlLines) -> serialport::Result<()> {
-        self.reflect_control_lines(lines)?;  // Do the basic reflection
-        if self.can_set_ring_indicator() {
-            self.set_ring_indicator(lines.ri)?;
-        }
-        if self.can_set_carrier_detect() {
-            self.set_carrier_detect(lines.cd)?;
-        }
-        Ok(())
-    }
-    fn capture_control_lines(&mut self) -> serialport::Result<PortControlLines> {
-        Ok(PortControlLines {
-            dsr: self.read_data_set_ready().unwrap_or(false),
-            cts: self.read_clear_to_send().unwrap_or(false),
-            cd: self.read_carrier_detect().unwrap_or(false),
-            ri: self.read_ring_indicator().unwrap_or(false),
-            dtr: self.read_data_terminal_ready().unwrap_or(false),
-            rts: self.read_request_to_send().unwrap_or(false),
-        })   
-    }   
-    
-}
 
 pub struct SerialPortWithGpios<T, G>
 where
@@ -225,41 +200,82 @@ where
     }
 }
 
-
-
-impl<T,G> SerialReflection for SerialPortWithGpios<T,G>
+impl<T,G> std::io::Read for SerialPortWithGpios<T,G>
 where
     T: serialport::SerialPort,
     G: GpioOut + Send,
 {
-    fn reflect_control_lines(&mut self, lines: &PortControlLines) -> serialport::Result<()> {
-        //self.port.write_data_set_ready(lines.dsr)?;
-        //self.port.write_clear_to_send(lines.cts)?;
-        self.set_carrier_detect(lines.cd)?;
-        self.set_ring_indicator(lines.ri)?;
-        self.write_request_to_send(lines.rts)?;
-        self.write_data_terminal_ready(lines.dtr)?;
-        Ok(())
-    }
-
-    fn capture_control_lines(&mut self) -> serialport::Result<PortControlLines> {
-        let mut lines = PortControlLines::new();
-        lines.dsr = self.read_data_set_ready()?;
-        lines.cts = self.read_clear_to_send()?;
-        lines.cd = self.read_carrier_detect()?;
-        lines.ri = self.read_ring_indicator()?;
-        lines.rts = self.read_request_to_send().unwrap_or(false);
-        lines.dtr = self.read_data_terminal_ready().unwrap_or(false);
-        Ok(lines)
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.port.read(buf)
     }
 }
+
+
+impl<T,G> std::io::Write for SerialPortWithGpios<T,G>
+where
+    T: serialport::SerialPort,
+    G: GpioOut + Send,
+{
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.port.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.port.flush()
+    }
+}
+
+
+impl<T,G> serialport::SerialPort for SerialPortWithGpios<T,G>
+where
+    T: serialport::SerialPort,
+    G: GpioOut + Send,
+{
+    // Delegate all methods to inner port
+    fn name(&self) -> Option<String> { self.port.name() }
+    fn baud_rate(&self) -> serialport::Result<u32> { self.port.baud_rate() }
+    fn data_bits(&self) -> Result<serialport::DataBits, serialport::Error> { self.port.data_bits() }
+    fn flow_control(&self) -> Result<serialport::FlowControl, serialport::Error> { self.port.flow_control() }
+    fn parity(&self) -> Result<serialport::Parity, serialport::Error> { self.port.parity() }
+    fn stop_bits(&self) -> Result<serialport::StopBits, serialport::Error> { self.port.stop_bits() }
+    fn timeout(&self) -> std::time::Duration { self.port.timeout() }
+    fn write_request_to_send(&mut self, level: bool) -> serialport::Result<()> { 
+        self.port.write_request_to_send(level).and_then(|_| {
+                self.last_set_rts = Some(level);
+                Ok(())
+            }) 
+    }
+    fn write_data_terminal_ready(&mut self, level: bool) -> serialport::Result<()> { 
+        self.port.write_data_terminal_ready(level).and_then(|_| {
+            self.last_set_dtr = Some(level);
+            Ok(())
+        })
+    }
+    fn read_clear_to_send(&mut self) -> serialport::Result<bool> { self.port.read_clear_to_send() }
+    fn read_data_set_ready(&mut self) -> serialport::Result<bool> { self.port.read_data_set_ready() }
+    fn read_ring_indicator(&mut self) -> serialport::Result<bool> { self.port.read_ring_indicator() }
+    fn read_carrier_detect(&mut self) -> serialport::Result<bool> { self.port.read_carrier_detect() }
+    fn bytes_to_read(&self) -> serialport::Result<u32> { self.port.bytes_to_read() }
+    fn bytes_to_write(&self) -> serialport::Result<u32> { self.port.bytes_to_write() }
+    fn clear(&self, buffer_to_clear: serialport::ClearBuffer) -> serialport::Result<()> { self.port.clear(buffer_to_clear) }
+    fn try_clone(&self) -> serialport::Result<Box<dyn serialport::SerialPort>> { self.port.try_clone() }
+    fn set_baud_rate(&mut self, baud_rate: u32) -> serialport::Result<()> { self.port.set_baud_rate(baud_rate) }
+    fn set_data_bits(&mut self, data_bits: serialport::DataBits) -> serialport::Result<()> { self.port.set_data_bits(data_bits) }
+    fn set_flow_control(&mut self, flow_control: serialport::FlowControl) -> serialport::Result<()> { self.port.set_flow_control(flow_control) }
+    fn set_parity(&mut self, parity: serialport::Parity) -> serialport::Result<()> { self.port.set_parity(parity) }
+    fn set_stop_bits(&mut self, stop_bits: serialport::StopBits) -> serialport::Result<()> { self.port.set_stop_bits(stop_bits) }
+    fn set_timeout(&mut self, timeout: std::time::Duration) -> serialport::Result<()> { self.port.set_timeout(timeout) }
+    fn set_break(&self) -> serialport::Result<()> { self.port.set_break() }
+    fn clear_break(&self) -> serialport::Result<()> { self.port.clear_break() }
+ }
+
 
 
 
 impl<T,G> AdvancedSerialPort for SerialPortWithGpios<T,G>
 where
-    T: serialport::SerialPort,
-    G: GpioOut + Send,
+    T: serialport::SerialPort + Sync,
+    G: GpioOut + Send + Sync,
 {
 
     fn can_set_ring_indicator(&self) -> bool {

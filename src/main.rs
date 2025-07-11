@@ -26,9 +26,12 @@ use clap::{value_parser, Arg, Command, ArgAction};
 use serialport::SerialPort;
 use pcap_file::{pcap::{PcapPacket, PcapWriter}, pcapng::blocks::packet, DataLink};
 use chrono::prelude::*;
+use crate::{datalink::parse_datalink, portinfo::{AnySerialPort, PortControlLines}};
 use crate::datalink::parse_datalink;
 
 pub mod datalink;
+pub mod portinfo;
+mod state;
 
 
 /// Represents the encapsulation mode used for the captured data.
@@ -47,13 +50,13 @@ pub enum EncapsulationMode {
 /// * `stopbits` - Number of stop bits (1 or 2)
 /// * `frame_gap_ms` - Time gap between frames in milliseconds
 struct CaptureSerial {
-   port: Box<dyn SerialPort>,
+   port: AnySerialPort,
    datalink: DataLink,
    baud_rate: u32,
    parity: char,
    stopbits: u8,
    frame_gap_ms: u64,
-   encap_mode: EncapsulationMode
+   encap_mode: EncapsulationMode,
 }
 
 
@@ -61,7 +64,7 @@ const MAX_PACKET_SIZE: usize = 1024;
 
 impl CaptureSerial {
     fn new(port_name: &str, baud_rate: u32, parity: char, stopbits: u8, frame_gap_ms: u64, datalink: DataLink, encap_mode: EncapsulationMode) -> io::Result<Self> {
-        let port = serialport::new(port_name, baud_rate)
+        let port = AnySerialPort::Basic(serialport::new(port_name, baud_rate)
             .parity(match parity {
                 'o' => serialport::Parity::Odd,
                 'e' => serialport::Parity::Even,
@@ -73,7 +76,7 @@ impl CaptureSerial {
                 _ => serialport::StopBits::One,
             })
             .timeout(Duration::from_millis(frame_gap_ms))
-            .open()?;
+            .open()?);
 
         Ok(CaptureSerial {
             port,
@@ -94,7 +97,8 @@ impl CaptureSerial {
     fn capture_packet(&mut self) -> Result<Vec<u8>, io::Error> {
         let mut buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
         let mut bytes_read = 0;
-        while match self.port.read(&mut buffer[bytes_read..]) {
+        while match self.port.as_serial_port().read(&mut buffer[bytes_read..]) {
+
             Ok(this_read_len) => {
                 bytes_read += this_read_len;
                 bytes_read < buffer.len()
