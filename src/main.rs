@@ -19,15 +19,15 @@
 //! ```
 
 
+use core::str;
 use std::fs::File;
 use std::io;
 use std::time::Duration;
 use clap::{value_parser, Arg, Command, ArgAction};
-use serialport::SerialPort;
+use serialport::{SerialPort, SerialPortType};
 use pcap_file::{pcap::{PcapPacket, PcapWriter}, pcapng::blocks::packet, DataLink};
 use chrono::prelude::*;
 use crate::{datalink::parse_datalink, portinfo::{AnySerialPort, PortControlLines}};
-use crate::datalink::parse_datalink;
 
 pub mod datalink;
 pub mod portinfo;
@@ -52,11 +52,13 @@ pub enum EncapsulationMode {
 struct CaptureSerial {
    port: AnySerialPort,
    datalink: DataLink,
+   bus_name: String,
    baud_rate: u32,
    parity: char,
    stopbits: u8,
    frame_gap_ms: u64,
    encap_mode: EncapsulationMode,
+   delayed_error: Option<io::Error>,
 }
 
 
@@ -85,18 +87,28 @@ impl CaptureSerial {
             stopbits,
             frame_gap_ms,
             datalink,
-            encap_mode
+            bus_name: port_name.to_string(),
+            encap_mode,
+            delayed_error: None,
         })
     }
+
 
     /// Captures a packet from the serial port
     ///
     /// # Returns
     /// 
     /// An `Option<Vec<u8>>` containing the captured packet data. Returns `None` if no data is captured.
-    fn capture_packet(&mut self) -> Result<Vec<u8>, io::Error> {
+    fn capture_packet(&mut self) -> Result<state::SerialEvent, io::Error> {
+
+        if let Some(err) = self.delayed_error.take() {
+            return Err(err);
+        }
+
         let mut buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
         let mut bytes_read = 0;
+
+        let mut control_lines_last = self.port.capture_control_lines()?;
         while match self.port.as_serial_port().read(&mut buffer[bytes_read..]) {
 
             Ok(this_read_len) => {
@@ -104,23 +116,33 @@ impl CaptureSerial {
                 bytes_read < buffer.len()
             },
             Err(e) => {
-                if (e.kind() == io::ErrorKind::TimedOut) {
+                if e.kind() == io::ErrorKind::TimedOut {
                     // Timeout is expected, but
                     // indicates the end of a packet.
                     false
                 } else {
                     // Handle other errors
-                    return Err(e);
-                    false
+                    if bytes_read == 0 {
+                        // If no bytes were read, return the error
+                        return Err(e);
+                    }
+                    self.delayed_error =  Some(e);
+                    return Ok(
+                        state::SerialEvent {
+                            timestamp: Utc::now(),
+                            data: buffer[..bytes_read].to_vec(),
+                            control_lines: control_lines_last,
+                        })
                 }
             },
-        }  {}
-
-        if bytes_read == 0 {
-            Ok(vec![])
-        } else {
-            Ok(buffer[..bytes_read].to_vec())
+        }  {
+                let current_control_lines = self.port.capture_control_lines()?;
+                if current_control_lines != control_lines_last {
+                    // handle control line changes
+                    control_lines_last = control_lines_last;
+                }
         }
+        Ok(state::SerialEvent::new(buffer, bytes_read, control_lines_last))
     }
 
     /// Captures data from the serial port and writes it to a PCAP file
@@ -142,19 +164,23 @@ impl CaptureSerial {
         };
         let mut writer = PcapWriter::with_header(file, pcap_header).expect("Error writing output file");
         let zero_time = Utc::now().timestamp_micros(); // Initialize zero time
+        let mut control_lines = self.port.capture_control_lines().
+                    unwrap_or_default(); // Get initial control lines state
         loop {
             let packet_maybe = self.capture_packet(); 
             if let Ok(packet) = packet_maybe {
-                if packet.is_empty() {
+                if packet.is_insignificant(&control_lines) {
                     continue;
                 }
 
                 // Encapsulate the packet data for the datalink type/force raw
                 let encap_packet = match self.encap_mode {
-                    EncapsulationMode::Raw => packet.clone(),
+                    EncapsulationMode::Raw => packet.data.clone(),
                     EncapsulationMode::DatalinkType => {
                         // Use the datalink type to encapsulate the data
-                        datalink::get_encapsulated_data(&Utc::now(), "serial", &self.datalink, &packet).unwrap()
+                        datalink::get_encapsulated_data(
+                            packet, &self.bus_name, &self.datalink
+                        ).unwrap()
                     }
                 };
                 writer.write_packet(
