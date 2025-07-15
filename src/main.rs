@@ -33,13 +33,14 @@ pub mod datalink;
 pub mod portinfo;
 mod state;
 
-
 /// Represents the encapsulation mode used for the captured data.
 pub enum EncapsulationMode {
     Raw,
     DatalinkType
 }
- 
+
+const MAX_PACKET_SIZE: usize = 2048; // Maximum size for a packet in bytes
+
 /// Represents a serial port capture session with configurable parameters
 /// 
 /// # Fields
@@ -62,7 +63,6 @@ struct CaptureSerial {
 }
 
 
-const MAX_PACKET_SIZE: usize = 1024;
 
 impl CaptureSerial {
     fn new(port_name: &str, baud_rate: u32, parity: char, stopbits: u8, frame_gap_ms: u64, datalink: DataLink, encap_mode: EncapsulationMode) -> io::Result<Self> {
@@ -138,8 +138,13 @@ impl CaptureSerial {
         }  {
                 let current_control_lines = self.port.capture_control_lines()?;
                 if current_control_lines != control_lines_last {
-                    // handle control line changes
-                    control_lines_last = control_lines_last;
+                    // If control lines have changed, we consider this a new packet
+                    return Ok(
+                        state::SerialEvent::new(
+                            buffer,
+                            bytes_read,
+                            control_lines_last)
+                        )
                 }
         }
         Ok(state::SerialEvent::new(buffer, bytes_read, control_lines_last))
